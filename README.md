@@ -1,9 +1,11 @@
 # GarrisonFarm 通用加速版（A卡 / N卡 / 核显通用）
 
-在 [UnknownGlyph/GarrisonFarm](https://github.com/UnknownGlyph/GarrisonFarm) 上游源码基础上做的性能与稳定性适配，重点解决两件事：
+是对【利用MAA自动刷取卫戍协议蚀刻章镀层】https://www.bilibili.com/video/BV1zMWZ6xED1?vd_source=0bba728f9468f8706baa0545228dd92b中的优化，大致是两点：
 
-1. **没有 N 卡也能用 GPU 加速** —— 用 DirectML，A 卡、I 卡、核显都能跑，不需要 CUDA。
-2. **截图提速 30 倍以上** —— 打开 MaaFramework 的 MuMu 原生通道，截图从 ~300ms 降到 ~8ms。
+1. 解决了之前部署逻辑导致放四到五个干员就放不了的问题
+2. 增加了gpu加速功能，适配各种型号显卡
+之后都是ai写的，建议直接把仓库发给ai运行
+
 
 > 上游原始项目：[UnknownGlyph/GarrisonFarm](https://github.com/UnknownGlyph/GarrisonFarm)
 > 个人优化版：[FJH3576/GarrisonFarm-Personal](https://github.com/FJH3576/GarrisonFarm-Personal)（轻骑可历#9000）
