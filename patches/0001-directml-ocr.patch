@@ -1,0 +1,96 @@
+--- a/garrison_farm.py
++++ b/garrison_farm.py
+@@ -293,18 +293,30 @@
+     tried.append(("内置", os.path.join(FALLBACK, "PaddleOCR")))
+     ocr_engine = None
+     for tag, m in tried:
+-        try:
+-            eng = RapidOCR(det_model_path=os.path.join(m, "det", "inference.onnx"),
+-                           rec_model_path=os.path.join(m, "rec", "inference.onnx"),
+-                           rec_keys_path=os.path.join(m, "rec", "keys.txt"), use_cls=False)
+-            if not eng(img)[0]:
+-                raise RuntimeError("测试识别没有结果")
+-            ocr_engine = eng
+-            check("✔" if tag == "MAA" else "⚠", "文字识别模型", f"使用{tag}模型")
++        # 依次尝试：DirectML(任意显卡, A卡可用) -> CUDA(N卡) -> CPU
++        # A卡用 DmlExecutionProvider；N卡有 onnxruntime-gpu 时用 CUDA；都没有则回退 CPU。
++        for accel, extra in (("DML", {"det_use_dml": True, "rec_use_dml": True}),
++                             ("CUDA", {"det_use_cuda": True, "rec_use_cuda": True}),
++                             ("CPU", {})):
++            try:
++                kw = dict(det_model_path=os.path.join(m, "det", "inference.onnx"),
++                          rec_model_path=os.path.join(m, "rec", "inference.onnx"),
++                          rec_keys_path=os.path.join(m, "rec", "keys.txt"), use_cls=False)
++                kw.update(extra)
++                eng = RapidOCR(**kw)
++                if not eng(img)[0]:
++                    raise RuntimeError("测试识别没有结果")
++                ocr_engine = eng
++                check("✔" if tag == "MAA" else "⚠", "文字识别模型",
++                      f"使用{tag}模型（{accel} 推理）")
++                break
++            except Exception as e:
++                if accel == "CPU":
++                    if tag == "MAA":
++                        check("⚠", "MAA 文字识别模型不可用", str(e)[:60])
++                # 非 CPU 失败则静默回退到下一档
++        if ocr_engine is not None:
+             break
+-        except Exception as e:
+-            if tag == "MAA":
+-                check("⚠", "MAA 文字识别模型不可用", str(e)[:60])
+     if ocr_engine is None:
+         fatal_box("文字识别模型无法加载，请重新完整解压程序包。")
+     print("==============================", flush=True)
+@@ -419,23 +431,35 @@
+     tried.append(("内置", os.path.join(FALLBACK, "PaddleOCR")))
+     ocr_engine = None
+     for tag, m in tried:
+-        try:
+-            eng = RapidOCR(det_model_path=os.path.join(m, "det", "inference.onnx"),
+-                           rec_model_path=os.path.join(m, "rec", "inference.onnx"),
+-                           rec_keys_path=os.path.join(m, "rec", "keys.txt"), use_cls=False)
+-            res, _ = eng(img)
+-            if not res:
+-                raise RuntimeError("测试识别没有结果")
+-            ocr_engine = eng
+-            if tag == "MAA":
+-                check("✔", "文字识别模型", "使用 MAA 的模型")
+-            else:
+-                check("⚠", "文字识别模型", "使用内置模型（MAA 的模型读取失败或不存在）")
+-                warnings.append("使用内置文字识别模型")
++        # 依次尝试：DirectML(任意显卡，A卡可用) -> CUDA(N卡) -> CPU
++        for accel, extra in (("DML", {"det_use_dml": True, "rec_use_dml": True}),
++                             ("CUDA", {"det_use_cuda": True, "rec_use_cuda": True}),
++                             ("CPU", {})):
++            try:
++                kw = dict(det_model_path=os.path.join(m, "det", "inference.onnx"),
++                          rec_model_path=os.path.join(m, "rec", "inference.onnx"),
++                          rec_keys_path=os.path.join(m, "rec", "keys.txt"), use_cls=False)
++                kw.update(extra)
++                eng = RapidOCR(**kw)
++                # 预热两次，让 det 的 session 也建立起来（否则首次推理含模型加载开销）
++                t0 = time.time()
++                for _ in range(2):
++                    res, _ = eng(img)
++                warm_ms = (time.time() - t0) * 500
++                if not res:
++                    raise RuntimeError("测试识别没有结果")
++                ocr_engine = eng
++                if tag == "MAA":
++                    check("✔", "文字识别模型", f"使用 MAA 的模型（{accel} 推理，{warm_ms:.0f}ms/次）")
++                else:
++                    check("⚠", "文字识别模型", f"使用内置模型（{accel} 推理，{warm_ms:.0f}ms/次）")
++                    warnings.append("使用内置文字识别模型")
++                break
++            except Exception as e:
++                if accel == "CPU" and tag == "MAA":
++                    check("⚠", "MAA 文字识别模型不可用", str(e)[:60])
++        if ocr_engine is not None:
+             break
+-        except Exception as e:
+-            if tag == "MAA":
+-                check("⚠", "MAA 文字识别模型不可用", str(e)[:60])
+     if ocr_engine is None:
+         fatal_box("文字识别模型无法加载（MAA 的和内置的都失败）。请重新完整解压程序包。")
+     print("==============================", flush=True)
