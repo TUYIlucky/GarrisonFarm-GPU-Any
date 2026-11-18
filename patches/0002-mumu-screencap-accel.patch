@@ -1,0 +1,98 @@
+--- a/garrison_farm.py
++++ b/garrison_farm.py
+@@ -684,8 +708,46 @@
+     return MaaCtl(ctl), sc.name, im.name
+ 
+ 
++def _mumu_extras_config(cfg):
++    """为 MuMu 打开 maafw 的原生加速通道（extras.mumu.enable）。
++
++    这是截图/触控提速的关键：开启后 maafw 直接调用 MuMu 的 nemu_capture_display
++    （共享内存取帧），实测截图从 ~300ms 降到 ~17ms；触控走 nemu_input_event_*。
++    不开启时 maafw 只能走 adb 通道，即使指定 EmulatorExtras 也会被忽略
++    （DLL 内部有 "extras.mumu.enable is false, ignore" 分支）。
++    与显卡无关：这是模拟器侧的共享内存直连，A卡/N卡都一样。
++    """
++    try:
++        idx = 0
++        if "instance_index" in cfg and isinstance(cfg["instance_index"], int):
++            idx = cfg["instance_index"]
++        # 自动定位 MuMu 安装目录
++        for p in (cfg.get("mumu_path"), os.environ.get("MUMU_PATH")):
++            if p and os.path.isdir(p):
++                break
++        else:
++            p = None
++            for cand in (r"D:\Program Files\MuMuPlayer", r"C:\Program Files\MuMuPlayer",
++                         r"C:\Program Files\MuMu", r"E:\Program Files\MuMuPlayer"):
++                if os.path.isdir(cand):
++                    p = cand
++                    break
++        ex = dict(cfg.get("extras") or {})
++        mumu = dict(ex.get("mumu") or {})
++        mumu["enable"] = True
++        if p:
++            mumu["path"] = p
++        mumu.setdefault("index", idx)
++        ex["mumu"] = mumu
++        out = dict(cfg)
++        out["extras"] = ex
++        return out, mumu.get("path")
++    except Exception:
++        return cfg, None
++
++
+ def maafw_adb(adb_path, address):
+-    """用 maafw 连接模拟器（自动测速选择截图/输入方式；MuMu 12 / 雷电 9 开启截图增强）"""
++    """用 maafw 连接模拟器（优先启用 MuMu 原生加速通道；失败则回退默认方式）"""
+     maafw_dll_dirs()
+     from maa.controller import AdbController
+     from maa.define import MaaAdbScreencapMethodEnum as SC, MaaAdbInputMethodEnum as IM
+@@ -695,10 +757,43 @@
+         if d.address == address:
+             sc, im, cfg = d.screencap_methods, d.input_methods, d.config      # 含 MuMu 截图增强配置
+             break
+-    ctl = AdbController(adb_path, address, sc, im, cfg)
+-    if not ctl.post_connection().wait().succeeded:
+-        raise RuntimeError("maafw 连接模拟器失败")
+-    return MaaCtl(ctl)
++
++    # 关键提速：打开 extras.mumu.enable，让 maafw 直连 MuMu 的共享内存取帧接口。
++    # 实测截图 ~300ms -> ~17ms。与显卡无关（模拟器侧直连，A/N 卡一致）。
++    cfg2, mumu_path = _mumu_extras_config(cfg)
++
++    # 优先尝试 EmulatorExtras（MuMu 原生，Very Fast / Lossless）
++    # 注意：输入方式不要用 IM.EmulatorExtras —— 实测它在选人/确认类点击后会让
++    # MuMu 通道失效（下一次截图报错）。截图用 EmulatorExtras、输入用默认（MaaTouch 等）最稳。
++    EXTRAS = SC.EmulatorExtras
++    attempts = [
++        ("MuMu原生加速", EXTRAS, im, cfg2),
++        ("默认配置+MuMu开关", sc, im, cfg2),
++        ("原始默认", sc, im, cfg),
++    ]
++    last_err = None
++    for tag, s, i, c in attempts:
++        try:
++            ctl = AdbController(adb_path, address, s, i, c)
++            if ctl.post_connection().wait().succeeded:
++                ctl.set_screenshot_use_raw_size(True)
++                # 实测一次截图，确认可用（EmulatorExtras 连上但取帧失败的情况要排除）
++                ok = False
++                t0 = time.time()
++                for _ in range(3):
++                    img = ctl.post_screencap().wait().get()
++                    if img is not None and getattr(img, "size", 0) and img.mean() > 1:
++                        ok = True
++                        break
++                    time.sleep(0.2)
++                dt = (time.time() - t0) * 1000
++                if ok:
++                    log(f"maafw 截图方式: {tag}（{dt/3:.0f}ms/帧，MuMu 路径 {mumu_path or '未识别'}）")
++                    return MaaCtl(ctl)
++                last_err = f"{tag} 取帧失败"
++        except Exception as e:
++            last_err = f"{tag}: {str(e)[:60]}"
++    raise RuntimeError(f"maafw 连接模拟器失败（{last_err}）")
+ 
+ 
+ # ---------------- 基础 ----------------
