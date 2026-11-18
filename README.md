@@ -4,8 +4,7 @@
 
 1. 解决了之前部署逻辑导致放四到五个干员就放不了的问题
 2. 增加了gpu加速功能，适配各种型号显卡
-之后都是ai写的，建议直接把仓库发给ai运行
-
+3. 之后都是ai写的，建议直接把仓库发给ai运行
 
 > 上游原始项目：[UnknownGlyph/GarrisonFarm](https://github.com/UnknownGlyph/GarrisonFarm)
 > 个人优化版：[FJH3576/GarrisonFarm-Personal](https://github.com/FJH3576/GarrisonFarm-Personal)（轻骑可历#9000）
