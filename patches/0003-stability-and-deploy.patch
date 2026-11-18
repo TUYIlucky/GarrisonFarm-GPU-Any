@@ -1,0 +1,158 @@
+--- a/garrison_farm.py
++++ b/garrison_farm.py
+@@ -707,14 +802,67 @@
+     r = subprocess.run(cmd, capture_output=True, creationflags=NOWIN)
+     return r.stdout if capture else None
+ 
++def _adb_shot_once():
++    """直接用 adb 截一张图（maafw 不可用时的兜底），失败返回 None"""
++    try:
++        raw = subprocess.run([ADB, "-s", DEV, "exec-out", "screencap", "-p"],
++                             capture_output=True, creationflags=NOWIN, timeout=20).stdout
++        if not raw:
++            return None
++        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
++        if img is None:
++            return None
++        if img.shape[1] < img.shape[0]:
++            img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
++        if img.shape[:2] != (1080, 1920):
++            img = cv2.resize(img, (1920, 1080))
++        return img
++    except Exception:
++        return None
++
++
++def _maafw_reconnect():
++    """maafw 会话失效（如模拟器进程重启）时尝试重连一次；成功返回 True"""
++    global MC
++    try:
++        mc = maafw_adb(ADB, DEV)
++        MC = mc
++        log("maafw 已重新连接")
++        return True
++    except Exception as e:
++        log("maafw 重连失败:", str(e)[:80])
++        return False
++
++
+ def shot():
+     if MC is not None:
+-        for _ in range(5):
+-            img = MC.shot()
++        for _ in range(3):
++            try:
++                img = MC.shot()
++            except Exception:
++                img = None
+             if img is not None and img.mean() > 1:
+                 return img
+             time.sleep(0.5)
+-        raise RuntimeError("截图失败（maafw）")
++        # 截图连续失败：可能是模拟器进程重启导致 maafw 会话失效，先尝试重连
++        log("截图失败，尝试重连 maafw …")
++        if _maafw_reconnect():
++            for _ in range(3):
++                try:
++                    img = MC.shot()
++                except Exception:
++                    img = None
++                if img is not None and img.mean() > 1:
++                    return img
++                time.sleep(0.5)
++        # 仍失败：退回 adb 截图，保证程序不中断
++        for _ in range(3):
++            img = _adb_shot_once()
++            if img is not None and img.mean() > 1:
++                log("已改用 adb 截图（maafw 不可用）")
++                return img
++            time.sleep(0.5)
++        raise RuntimeError("截图失败（maafw 与 adb 均失败）")
+     if BACKEND == "pc":
+         for _ in range(5):
+             img = PCW.shot()
+@@ -722,10 +870,10 @@
+                 return img
+             time.sleep(0.5)
+         raise RuntimeError("PC 端截图失败（游戏窗口是否被最小化？）")
++    # 没有 maafw（--no-maafw 或加载失败）：直接用 adb 截图
+     for _ in range(5):
+-        raw = adb("exec-out", "screencap", "-p", capture=True)
+-        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+-        if img is not None:
++        img = _adb_shot_once()
++        if img is not None and img.mean() > 1:
+             return img
+         time.sleep(0.5)
+     raise RuntimeError("截图失败")
+@@ -820,16 +968,39 @@
+     cv2.imwrite(p, img)
+     return p
+ 
++def _norm_strategy_name(name):
++    """策略名归一化：OCR 偶尔把同一个策略读成繁体/异体字（如「伊奧莱塔」/「伊奥莱塔」），
++    会让同一个策略被当成两个、重复刷取。这里做一个轻量的繁简映射，
++    只处理 OCR 在策略名上实际会混淆的高频字，不引入额外依赖。"""
++    if not name:
++        return name
++    table = str.maketrans({
++        "奧": "奥", "歐": "欧", "爾": "尔", "絲": "丝", "維": "维", "亞": "亚",
++        "貝": "贝", "諾": "诺", "瑪": "玛", "麗": "丽", "萊": "莱", "蓋": "盖",
++        "羅": "罗", "薩": "萨", "倫": "伦", "傑": "杰", "茲": "兹", "凱": "凯",
++        "德": "德", "靈": "灵", "爾": "尔", "維": "维", "絲": "丝", "緹": "缇",
++        "婭": "娅", "葉": "叶", "蓮": "莲", "潔": "洁", "瓊": "琼", "瓏": "珑",
++        "貓": "猫", "龍": "龙", "鳳": "凤", "鶴": "鹤", "鷹": "鹰", "馬": "马",
++        "鳥": "鸟", "魚": "鱼", "點": "点", "線": "线", "練": "练", "級": "级",
++        "屬": "属", "國": "国", "學": "学", "術": "术", "隊": "队", "員": "员",
++    })
++    return name.translate(table).strip()
++
++
+ def load_done():
+     try:
+         with open(DONE_FILE, encoding="utf-8") as f:
+-            return set(json.load(f))
++            raw = json.load(f)
++        # 归一化后去重，避免繁简/异体字造成同一策略记两条
++        return {_norm_strategy_name(x) for x in raw}
+     except Exception:
+         return set()
+ 
+ def save_done(s):
++    # 写入前统一归一化，保证同一策略只存一份
++    norm = {_norm_strategy_name(x) for x in s}
+     with open(DONE_FILE, "w", encoding="utf-8") as f:
+-        json.dump(sorted(s), f, ensure_ascii=False, indent=1)
++        json.dump(sorted(norm), f, ensure_ascii=False, indent=1)
+ 
+ def yellow_ratio(img, box):
+     x1, y1, x2, y2 = box
+@@ -1405,9 +1576,26 @@
+         if free:
+             target = free[0]
+             break
+-        # 只换下已知的低星（Ⅰ~Ⅳ）干员；场上的 Ⅴ/Ⅵ 干员（含未知占位者）一律不换
++        # 替换规则（改进版）：
++        #   1) 低星干员（Ⅰ~Ⅳ）：可被任何价值更高的干员换下
++        #   2) 场上的 Ⅴ/Ⅵ 干员：默认不换（避免误卖高星）；
++        #      但若【新来的干员在优先名单内】而【场上的不在优先名单内】，
++        #      则允许换下——避免早期刷到的弱 Ⅴ/Ⅵ（如机械师）占死格子，
++        #      导致后期优先干员（斩业星熊、逻各斯等）永远上不了场。
++        #   3) 未知占位者（名字 "?"）：一律不换
++        new_is_prio = prio_index(name) is not None
++
++        def swappable(tn, occ):
++            onm, otier = occ
++            if onm == "?":
++                return False
++            if otier < 5:
++                return True
++            # 场上是 Ⅴ/Ⅵ：仅当新干员是优先干员、而场上不是时才允许换
++            return new_is_prio and prio_index(onm) is None
++
+         cands = sorted((value(tn, occs[tn]), grp.index(tn), tn) for tn in grp
+-                       if occs[tn][1] < 5 and occs[tn][0] != "?" and value(tn, occs[tn]) < my)
++                       if swappable(tn, occs[tn]) and value(tn, occs[tn]) < my)
+         if cands:
+             target = cands[0][2]
+             swap_out = occs[target]
