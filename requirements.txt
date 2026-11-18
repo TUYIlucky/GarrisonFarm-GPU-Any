@@ -1,0 +1,14 @@
+# 本项目新增/修改的依赖
+# 用法: python -m pip install -r requirements.txt
+#
+# 注意 onnxruntime 三选一（互斥），见 README「显卡适配对照」：
+#   AMD / Intel / 核显:  pip install onnxruntime-directml
+#   NVIDIA (CUDA 12):    pip install onnxruntime-gpu
+#   无独显:              不装（自动回退 CPU）
+# 下面默认给 AMD/Intel 用的 directml；N 卡请自行替换成 onnxruntime-gpu。
+
+numpy>=2.2,<3
+opencv-python>=4.10,<5
+rapidocr-onnxruntime==1.4.4
+maafw==5.16.1
+onnxruntime-directml
