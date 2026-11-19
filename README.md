@@ -1,10 +1,9 @@
 # GarrisonFarm 通用加速版（A卡 / N卡 / 核显通用）
 
-是对【利用MAA自动刷取卫戍协议蚀刻章镀层】https://www.bilibili.com/video/BV1zMWZ6xED1?vd_source=0bba728f9468f8706baa0545228dd92b中的优化，大致是两点：
+在 [UnknownGlyph/GarrisonFarm](https://github.com/UnknownGlyph/GarrisonFarm) 上游源码基础上做的性能与稳定性适配，重点解决两件事：
 
-1. 解决了之前部署逻辑导致放四到五个干员就放不了的问题
-2. 增加了gpu加速功能，适配各种型号显卡
-3. 之后都是ai写的，建议直接把仓库发给ai运行
+1. **没有 N 卡也能用 GPU 加速** —— 用 DirectML，A 卡、I 卡、核显都能跑，不需要 CUDA。
+2. **截图提速 30 倍以上** —— 打开 MaaFramework 的 MuMu 原生通道，截图从 ~300ms 降到 ~8ms。
 
 > 上游原始项目：[UnknownGlyph/GarrisonFarm](https://github.com/UnknownGlyph/GarrisonFarm)
 > 个人优化版：[FJH3576/GarrisonFarm-Personal](https://github.com/FJH3576/GarrisonFarm-Personal)（轻骑可历#9000）
@@ -424,6 +423,212 @@ def save_done(s):
 
 > 注意：这不影响「策略是否跳过」的判断 —— 那个靠游戏内 OCR 读到的真实通关次数决定，
 > 这里只是让进度记录不重复。
+
+---
+
+## 界面切换与召唤物导致的无效操作
+
+这两个问题都是长跑实测出来的，会白白拖慢速度。
+
+### 问题一：选完编队后必然触发一次截图失败
+
+10 小时的实测日志里，52 局共触发 **90 次截图失败**，其中 **94.3% 发生在「自选编队选择」之后**：
+
+```
+12:22:32 自选编队选择: ['维什戴尔', '斩业星熊', ...]
+12:22:41 截图失败，尝试重连 maafw …        ← 9 秒后
+12:34:14 自选编队选择: [...]
+12:34:23 截图失败，尝试重连 maafw …        ← 9 秒后
+```
+
+**原因**：`pick_squad()` 点「确定」后只 `time.sleep(1.5)`。此时游戏正从选人页切回准备页，
+MuMu 的共享内存帧缓冲在重建，取帧必然失败，于是走了重连流程（白等 2~4 秒）。
+
+**改法**：新增 `_wait_screen_stable()`，轮询等待画面连续两帧基本一致才继续：
+
+```python
+def _wait_screen_stable(min_wait=2.0, timeout=8.0):
+    """连续两次截图都成功且画面基本一致 -> 界面稳定"""
+    ...
+    diff = float(cv2.absdiff(prev, img).mean())
+    if diff < 2.0:
+        return True
+```
+
+在 `pick_squad()` 点完确定后调用，主动跳过缓冲重建的窗口，而不是撞上去再重连。
+
+### 问题二：召唤物被当成干员，拖拽必然失败
+
+11 次「放置失败」全部集中在这三个名字上：
+
+| 单位 | 失败次数 | 性质 |
+| --- | --- | --- |
+| 变形同构体 | 8 | 战术家召唤物 |
+| 狼群 | 2 | 召唤物 |
+| 樱桃三号 | 1 | 召唤物 |
+
+这些是**衍生物/召唤物**，不是可自由摆放的干员，按固定坐标拖到部署区当然会失败。
+
+**改法**：加一份召唤物名单，识别到就放回备战席，不占格子、不参与替换判断：
+
+```python
+SUMMON_KEYS = ["变形同构体", "同构体", "狼群", "樱桃三号", "信标", "流形",
+               "重构体", "汲取者之心", "拟态物质", "蜂鸣器", ...]
+
+def _is_summon(name):
+    return any(k in _norm_strategy_name(name) for k in SUMMON_KEYS)
+```
+
+在 `deploy_layout()` 取到名字后立刻判断：
+
+```python
+if _is_summon(name):
+    touch("UP", lx, ly); time.sleep(0.8)
+    log("跳过召唤物:", name)
+    return None
+```
+
+9 个用例验证：召唤物全部识别，正常干员（维什戴尔/斩业星熊/逻各斯/机械师/陈）全部不误伤。
+
+---
+
+## 内存翻倍：rapidocr 的 float64 坑
+
+长时间跑会遇到这个崩溃（不是卡死，是进程直接消失）：
+
+```
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 47.8 MiB
+for an array with shape (1088, 1920, 3) and data type float64
+```
+
+**根因**在 `rapidocr_onnxruntime/ch_ppocr_det/utils.py`：
+
+```python
+self.mean = np.array([0.5, 0.5, 0.5])     # ← 默认 float64
+self.std  = np.array([0.5, 0.5, 0.5])     # ← 默认 float64
+
+def normalize(self, img):
+    return (img.astype("float32") * self.scale - self.mean) / self.std
+```
+
+`img.astype("float32")` 本身是 float32，但和 **float64 的 mean/std 运算**时，
+NumPy 的类型提升规则会把结果变成 **float64**，内存直接翻倍：
+
+| 版本 | 数组大小 | dtype |
+| --- | --- | --- |
+| 正常 | 23.9 MB | float32 |
+| **实际** | **47.8 MB** | **float64** |
+
+报错里的 47.8 MiB 正好对上。32GB 内存的机器上，剩下的余量一旦不够就会崩。
+
+**修复**：把 mean/std 声明为 float32。
+
+```python
+self.mean = np.array(mean, dtype=np.float32)
+self.std  = np.array(std,  dtype=np.float32)
+```
+
+一行改动，内存减半，识别结果完全一致（实测 33 条文本不变），速度还略快。
+
+仓库里提供了 `fix_rapidocr_dtype.py` 自动处理：
+
+```powershell
+python fix_rapidocr_dtype.py           # 检查并修复
+python fix_rapidocr_dtype.py --check   # 只看状态
+```
+
+> 这是修改 site-packages 里的第三方库文件。重装 rapidocr 后需要重新跑一次。
+> 补丁脚本会先备份成 `utils.py.bak`。
+
+---
+
+## 策略列表网格标定（跳过策略的真因）
+
+### 现象
+
+长跑日志里反复出现：
+
+```
+策略面板读取失败，跳过该格 (680, 632)
+策略面板读取失败，跳过该格 (1100, 659)
+策略列表下滑，继续查找（本页 4 行）
+```
+
+一晚上累积 **294 次**。表现是某些策略总被跳过，选一次策略要白花 20~40 秒。
+
+### 根因：网格坐标与实际布局对不上
+
+上游的网格定义（1920×1080）：
+
+```python
+GRID_X = [680, 890, 1100, 1310]
+GRID_Y = [370, 580, 790, 1000]
+GRID_TOP, GRID_BOTTOM = 250, 1050
+```
+
+实测（逐格截图核对）真实布局：
+
+| 项目 | 上游值 | 实测值 | 差异 |
+| --- | --- | --- | --- |
+| 列中心 x | 680 / 890 / 1100 / 1310 | **600 / 800 / 1000 / 1200** | 偏 80~110 px |
+| 行中心 y | 370 / 580 / 790 / 1000 | **230 / 444 / 660 / 976** | 首行偏 140 px |
+
+卡片本身约 **170×170**，列间距 200 px。点击落在卡片边缘或格子之间，
+右侧面板自然读不出策略名 → 判为「读取失败」→ 跳过整格。
+
+另外 `GRID_TOP = 250` 会让 **第一行（y≈230）几乎在扫描范围外**，
+`detect_rows()` 长期漏掉第一行。
+
+### 修复
+
+```python
+GRID_X = [600, 800, 1000, 1200]
+GRID_Y = [230, 444, 660, 976]
+GRID_TOP, GRID_BOTTOM = 120, 1050
+ROW_H  = 165
+```
+
+同时改了 `detect_rows()`（滚动后的行检测）：
+
+1. 不再只看第 1 列（x 620~740）——某些行只有 1~2 个卡片，第 1 列为空时整行判不出来；
+   改成扫描整个列表宽度（x 570~1250）。
+2. 用「段高度接近一张卡片（110~230 px）」过滤标题行和零碎文字。
+3. 两行间距异常大（>260 px）时，检查中点为是否确实有卡片，有则补一行。
+4. 检测结果不合理（<2 或 >6 行）时返回空，让调用方退回固定网格。
+
+滚动后行检测失败时，也不再直接 `break` 放弃，而是用 `grid_shift()` 测出的滚动量
+平移固定网格继续找：
+
+```python
+sh2 = grid_shift(img, after)
+rows = [y - sh2 for y in GRID_Y]
+```
+
+### `strategy_name()` 也放宽了
+
+上游只在 y 520~650 的窄带里找策略名，实测策略名可能落在该范围外：
+
+```python
+# 放宽到 460~700，排除更多非策略名文案，取最靠上的一条
+cand = [(y, t) for x, y, t in panel
+        if 460 < y < 700
+        and 汉字 and not any(b in t for b in BAD)
+        and 2 <= len(t.strip()) <= 12]
+cand.sort(key=lambda c: c[0])
+```
+
+### 怎么自己重新标定
+
+如果换了分辨率、UI 主题或游戏大版本，坐标会失效。标定方法：
+
+1. 进到「选择策略」界面，截一张图
+2. 用任意画图工具在上面画网格，或者跑仓库里的思路：先按 `GRID_X` 画竖线定位列，
+   再逐行找卡片上下边缘取中心
+3. 把量到的值填回 `GRID_X` / `GRID_Y`
+4. 复核：在截图上把所有 `(x, y)` 交点画出来，应当每一点都落在卡片正中心
+
+> 提示：不同分辨率下要按比例换算。`GRID_X` 是 4 等分的列中心，
+> 从约 31% 宽度开始、每列约 10.4% 宽度。
 
 ---
 
