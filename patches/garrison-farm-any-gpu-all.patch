@@ -317,35 +317,94 @@
  
  def yellow_ratio(img, box):
      x1, y1, x2, y2 = box
-@@ -838,8 +1009,13 @@
+@@ -838,20 +1009,51 @@
      return m.mean() / 255
  
  # ---------------- 开局流程 ----------------
 -GRID_X = [680, 890, 1100, 1310]      # 选中任意策略后网格左移后的列中心
 -GRID_Y = [370, 580, 790, 1000]
-+# 策略网格列中心（选中任意策略后网格左移后的固定布局）
-+# 实测：策略卡约 170x170，列间距 200px，共 4 列（x=600/800/1000/1200）
-+GRID_X = [600, 800, 1000, 1200]
-+# 第一屏各行中心（实测值，用 seq_022 截图逐格核对）：
-+#   第1行 230、第2行 444、第3行 660（此行可能只有 1 个卡片）、
-+#   分组「盟约型策略」之后的首行 976
-+GRID_Y = [230, 444, 660, 976]
++# 策略网格列中心（1920×1080，实测）。
++# 布局：详情面板在右侧（x≈1420~1830），策略列表在左侧偏中（x≈570~1400）。
++# 卡片约 170×170，列/行间距约 210。
++GRID_X = [1093, 1303, 1513, 1723]
++GRID_Y = [358, 568, 778, 988]
++
++def _badge_box(gx, gy):
++    """角标采样框。角标约 50x56，位于卡片**右上角**。
++
++    实测（CHK2.png，以卡片中心为原点）：角标中心在 (+53, -58)，
++    尺寸 49x56。所以采样框要往「右上方」取。
++
++    历史 bug：这里曾写成 gx-75 ~ gx-5（往左取），完全框不到角标，
++    于是全部格子都被判成"无角标"，程序把已完成的策略也当成未完成去点。
++    """
++    cx, cy = gx + 53, gy - 58
++    x1 = max(0, cx - 34)
++    y1 = max(0, cy - 34)
++    x2 = min(1920, cx + 34)
++    y2 = min(1080, cy + 34)
++    return x1, y1, x2, y2
++
  
  def has_color_badge(img, gx, gy):
-     """格子右上角的彩色（镀层）角标：青蓝色系、不是金色（游戏内实测：彩标 0.37，金标 0）"""
-@@ -861,8 +1037,9 @@
+-    """格子右上角的彩色（镀层）角标：青蓝色系、不是金色（游戏内实测：彩标 0.37，金标 0）"""
+-    x1, y1, x2, y2 = gx + 40, max(0, gy - 110), gx + 95, gy - 45
++    """格子右上角的彩色（镀层）角标：青蓝色系、非金色。
++
++    上游采样区间是 gx+40..gx+95（偏右 40~95px），实际角标在卡片右上、
++    相对中心偏左偏上，完全没框住 → 已完成的策略被判为"可点"，
++    点进去读不到名字又跳过，导致反复空转、后面策略选不到。
++    """
++    x1, y1, x2, y2 = _badge_box(gx, gy)
++    if x2 <= x1 or y2 <= y1:
++        return False
+     hsv = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+-    cyan = cv2.inRange(hsv, (70, 40, 150), (140, 255, 255)).mean() / 255
+-    return cyan > 0.15 and yellow_ratio(img, (x1, y1, x2, y2)) < 0.05
++    cyan = cv2.inRange(hsv, (75, 50, 120), (140, 255, 255)).mean() / 255
++    # 框比角标大，占比阈值相应降低（实测有角标 0.15~0.30，无角标 <0.02）
++    return cyan > 0.08 and yellow_ratio(img, (x1, y1, x2, y2)) < 0.08
+ 
+ 
+ def has_badge(img, gx, gy):
+-    """格子右上角的金色角标"""
+-    return yellow_ratio(img, (gx + 40, gy - 100, gx + 90, gy - 50)) > 0.12 or         yellow_ratio(img, (gx + 30, max(0, gy - 130), gx + 100, gy - 30)) > 0.10
++    """格子右上角的金色角标（与彩标同一区域，颜色为金色）"""
++    x1, y1, x2, y2 = _badge_box(gx, gy)
++    if x2 <= x1 or y2 <= y1:
++        return False
++    return yellow_ratio(img, (x1, y1, x2, y2)) > 0.08
+ 
+ def passed_count(panel):
+     """右侧面板"已通过模拟N次"中的 N；没有则 0"""
+@@ -861,13 +1063,23 @@
              return int(d) if d else 1
      return 0
  
 -GRID_TOP, GRID_BOTTOM = 250, 1050       # 策略网格可见区域（纵向）
 -ROW_H = 210                              # 行间距
-+# 策略网格可见区域（纵向）。原值 250 会把第一行（y≈190）漏掉，改为 120。
-+GRID_TOP, GRID_BOTTOM = 120, 1050
-+ROW_H = 165                              # 行间距（实测约 165，旧值 210 偏大）
++# 详情面板 OCR 区域（右侧）。实测策略名「Touch」在 y≈530，
++# 面板含「初始生命值」「已通过模拟N次」「【外勤医疗】」等文案。
++# 详情面板 OCR 区域（右侧）。
++# 实测面板自上而下：「已通过模拟N次」(y≈200) → STRATEGY 标签(y≈280)
++#   → 「初始生命值」(y≈498) → 策略名(y≈575) → 「【效果名】」(y≈662)
++# 上界必须包含 y≈200 的次数，否则 passed_count() 永远读不到，
++# 「次数达标就跳过」这条保护会完全失效（天空盒 10 次仍被反复选中）。
++PANEL_BOX = (1400, 150, 1920, 850)
++
++# 策略网格可见区域（纵向）。首行实测在 y≈200。
++GRID_TOP, GRID_BOTTOM = 140, 1050
++ROW_H = 210                              # 行间距（实测约 210）
  
  
  def grid_shift(before, after):
-@@ -877,19 +1054,56 @@
+     """滚动后网格移动了多少像素（向上为正），用模板匹配测量"""
+-    strip = before[560:700, 600:1400]
++    strip = before[460:600, 600:1400]
+     area = after[GRID_TOP:GRID_BOTTOM, 600:1400]
+     res = cv2.matchTemplate(area, strip, cv2.TM_CCOEFF_NORMED)
+     _, mx, _, loc = cv2.minMaxLoc(res)
+@@ -877,19 +1089,57 @@
  
  
  def detect_rows(img):
@@ -363,7 +422,8 @@
 +    再按预期的行距对齐到网格，最后过滤掉不合理的结果。
 +    如果检测结果与预期行数差距过大，就返回 [] 让调用方退回固定的 GRID_Y。
 +    """
-+    band = cv2.cvtColor(img[:, 570:1250], cv2.COLOR_BGR2GRAY).astype(np.float32)
++    # 策略列表在中间（x 约 570~1400），详情面板在右侧
++    band = cv2.cvtColor(img[:, 600:1400], cv2.COLOR_BGR2GRAY).astype(np.float32)
 +    # 每行在水平方向上的方差：有卡片时高，纯背景时低
 +    prof = band.std(axis=1)
 +    on = prof > 20
@@ -412,38 +472,265 @@
      return rows
  
  
-@@ -904,10 +1118,21 @@
+@@ -903,59 +1153,212 @@
+     time.sleep(0.8)
  
  
++def _card_present(img, gx, gy):
++    """该网格位置是否真的有卡片。
++
++    策略列表不是严格矩形：某些行只有 1~2 张卡（其余位置是空的），
++    直接按 4 列去点会点到空白处，白白触发一次「策略面板读取失败」。
++    """
++    x1, y1 = max(0, gx - 70), max(0, gy - 70)
++    x2, y2 = min(img.shape[1], gx + 70), min(img.shape[0], gy + 70)
++    if x2 <= x1 + 20 or y2 <= y1 + 20:
++        return False
++    sub = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
++    return sub.std() > 12 and sub.mean() > 28
++
++
  def strategy_name(panel):
 -    cand = [(y, t) for x, y, t in panel if 520 < y < 650
-+    """从右侧面板里取策略名。
-+
-+    上游只在 y 520~650 的窄带里找。实测策略名有时会落在该范围外
-+    （不同策略名的排版高度略有差异），导致误判为「读取失败」而跳过整格。
-+    这里放宽范围到 460~700，并排除更多非策略名的常见文案，取最靠上的一条。
-+    """
-+    BAD = ("生命", "通过", "【", "】", "模拟", "回合", "次数", "资金",
-+           "被动", "效果", "拖拽", "使用", "选择", "确认", "取消", "本局")
-+    cand = [(y, t) for x, y, t in panel
-+            if 460 < y < 700
-             and any("\u4e00" <= ch <= "\u9fff" for ch in t)
+-            and any("\u4e00" <= ch <= "\u9fff" for ch in t)
 -            and "生命" not in t and "通过" not in t and "【" not in t]
 -    return cand[0][1] if cand else ""
-+            and not any(b in t for b in BAD)
-+            and 2 <= len(t.strip()) <= 12]
-+    cand.sort(key=lambda c: c[0])
-+    return cand[0][1].strip() if cand else ""
++    """从右侧详情面板里取策略名。
++
++    实测面板结构：「初始生命值 N」→ 策略名 → 「【效果名】」+ 说明。
++    策略名的 y 随名字长短浮动（实测 490~600），故范围放宽到 430~640。
++
++    注意：策略名可能是**单个汉字**（如「夕」）或纯英文（「Touch」「pith」）。
++    历史 bug：曾要求 len(s) >= 2，导致「夕」被丢掉、那格判为读取失败，
++    于是这类策略永远选不到。
++    """
++    BAD = ("生命", "通过", "【", "】", "模拟", "回合", "次数", "资金",
++           "被动", "效果", "拖拽", "使用", "选择", "确认", "取消", "本局",
++           "决策", "信息", "STRATEGY", "初始", "COLLABORATIVE", "PROTOCOL",
++           "禁选", "已选", "禁用", "阵容", "编队", "交流", "放弃", "COUNTDOWN")
++    cand = []
++    for x, y, t in panel:
++        s = t.strip()
++        if not (430 < y < 640):
++            continue
++        if not s or len(s) > 14:
++            continue
++        if any(b in s for b in BAD):
++            continue
++        if not any("\u4e00" <= ch <= "\u9fff" or ch.isalpha() for ch in s):
++            continue          # 纯数字/符号（如「28」）
++        has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in s)
++        if not has_cjk:
++            core = s.strip(" .。·-")
++            if "." in s or "。" in s or len(core) < 3 or not core.isalpha():
++                continue      # 排除 NO./V/VI 之类
++        cand.append((has_cjk, y, s))
++    cand.sort(key=lambda c: (0 if c[0] else 1, c[1]))
++
++    # 排除干员名被当成策略名（曾出现「选择策略: 维什戴尔」这种错）
++    for _has, _y, s in cand:
++        if prio_index(s) is not None:
++            continue
++        if is_safe_op(s):
++            continue
++        return s
++    return ""
++
++
++# 徽章中心 -> 卡片中心 的偏移（实测：徽章在卡片右上角，故 x 偏左、y 偏下）
++CARD_FROM_BADGE_DX, CARD_FROM_BADGE_DY = -42, 48
++
++
++def grid_from_badges(img):
++    """按卡片右上角的星级徽章定位真实网格，返回 (xs, ys, ok)。
++
++    徽章是 26x31 的白色小图标，每张卡右上角各一个，位置很稳定
++    （深色人像卡、选中态、未解锁空位都不影响它），比"卡片亮区"可靠。
++    徽章中心 -> 卡片中心 的偏移实测为 (-42, +48)。
++    """
++    white = cv2.inRange(img, (205, 205, 205), (255, 255, 255))
++    n, _lab, stats, _cent = cv2.connectedComponentsWithStats(white, 8)
++    pts = []
++    for i in range(1, n):
++        x, y, w, h, a = stats[i]
++        cx, cy = x + w // 2, y + h // 2
++        if 23 <= w <= 31 and 27 <= h <= 35 and 400 < cx < 1800 and 250 < cy < 1060:
++            pts.append((int(cx), int(cy)))
++    if len(pts) < 3:
++        return None, None, False
++
++    # 4 列徽章的 x 是固定的，用"与标准列位置接近"判定，
++    # 不要求每列都有多个（滚动到分组边界时某些列可能只剩 1 个）
++    RAW_COL_X = [1135, 1345, 1555, 1765]
++    COL_TOL = 25
++    colx = []
++    for want in RAW_COL_X:
++        near = [p for p in pts if abs(p[0] - want) <= COL_TOL]
++        colx.append(min(near, key=lambda p: abs(p[0] - want))[0] if near else want)
++    if sum(1 for p in pts if any(abs(p[0] - c) <= COL_TOL for c in RAW_COL_X)) < 3:
++        return None, None, False
++
++    def cluster(vals, tol=18):
++        vals = sorted(vals)
++        groups = []
++        for v in vals:
++            if groups and v - groups[-1][-1] <= tol:
++                groups[-1].append(v)
++            else:
++                groups.append([v])
++        return [int(sum(g) / len(g)) for g in groups]
++
++    # 只保留徽章确实落在标准列上的行（剔除分组标题旁的白色小图标）
++    rowy = [r for r in cluster([p[1] for p in pts])
++            if any(abs(p[1] - r) <= 18 and any(abs(p[0] - c) <= COL_TOL for c in RAW_COL_X)
++                   for p in pts)]
++    if not rowy:
++        return None, None, False
++
++    # 补全被漏检的行（徽章变绿/被遮挡时检测不到），用行距 210 外推
++    def has_card_at(y):
++        y0, y1 = max(0, y - 45), min(img.shape[0], y + 45)
++        stripe = cv2.cvtColor(img[y0:y1, 1000:1800], cv2.COLOR_BGR2GRAY).astype(np.float32)
++        return stripe.std() > 22
++
++    filled = list(rowy)
++    for base in rowy:
++        for k in (-1, 1):
++            cy = base + k * 210
++            if not (GRID_TOP <= cy <= GRID_BOTTOM):
++                continue
++            if any(abs(cy - e) <= 60 for e in filled):
++                continue
++            if has_card_at(cy):
++                filled.append(cy)
++    ys = sorted(y + CARD_FROM_BADGE_DY for y in filled)
++    xs = sorted(c + CARD_FROM_BADGE_DX for c in colx)
++    return xs, ys, True
++
++
++def current_grid(img=None):
++    """取当前策略页的真实网格，测不出来时退回固定坐标。"""
++    if img is None:
++        img = shot()
++    xs, ys, ok = grid_from_badges(img)
++    if ok:
++        return xs, ys, True
++    for _ in range(2):
++        time.sleep(0.4)
++        try:
++            xs, ys, ok = grid_from_badges(shot())
++        except Exception:
++            continue
++        if ok:
++            return xs, ys, True
++    return list(GRID_X), list(GRID_Y), False
  
  
  def pick_strategy(done):
-@@ -964,8 +1189,19 @@
+-    """选择策略：角标需要通过 3 次。
+-    按网格顺序取第一个"无金色角标且通过次数 < 3"的策略（进行中的策略总在最前面），
+-    当前页都不可用时向下滚动继续找；不再逐个遍历所有策略。"""
+-    tap(1500, 580, 1.0)   # 先点一个格子，让网格左移到固定布局
+-    rows = list(GRID_Y)
++    """选择策略：同一策略通关 TARGET 次即算完成，然后换下一个。
++
++    重要：选中任意一张策略卡后，**策略列表会整体左移**（右侧让出详情面板），
++    之后再点原来那组 x 坐标就会点空或点到别的卡，右侧面板也一直停在
++    上一次选中的那张上（日志里出现"每格都读到天空盒"就是这个原因）。
++    所以这里每次都重新实测网格，用"当前画面"的坐标去点。
++    """
+     tried = set()
+     for page in range(8):
+         img = shot()
+-        for gy in rows:
+-            if not (GRID_TOP + 60 <= gy <= GRID_BOTTOM - 40):
++        xs, rows, ok = current_grid(img)
++        if not ok:
++            xs, rows = list(GRID_X), list(GRID_Y)
++            log("策略网格实测失败，使用兜底坐标")
++        # 逐行逐列，每格都按当前画面重新取坐标
++        for gy0 in rows:
++            if not (GRID_TOP + 40 <= gy0 <= GRID_BOTTOM - 20):
+                 continue
+-            for gx in GRID_X:
+-                if has_color_badge(img, gx, gy) or (TARGET <= 3 and has_badge(img, gx, gy)):
++            for gx0 in xs:
++                img = shot()
++                xs_n, rows_n, ok_n = current_grid(img)
++                if not ok_n:
++                    xs_n, rows_n = xs, rows
++                # 用"当前画面"里最接近原 (gx0,gy0) 的真实格中心
++                gx = min(xs_n, key=lambda v: abs(v - gx0))
++                gy = min(rows_n, key=lambda v: abs(v - gy0))
++                if abs(gx - gx0) > 120 or abs(gy - gy0) > 120:
++                    continue                     # 这一格已经不在画面里
++                if has_color_badge(img, gx, gy):
++                    continue                     # 已有彩色角标 = 已完成
++                if TARGET <= 3 and has_badge(img, gx, gy):
++                    continue                     # 金色模式下的金标
++                if not _card_present(img, gx, gy):
++                    continue                     # 空位
++                tap(gx, gy, 0.7)
++                # 面板切换动画需要时间，等稳定后再读
++                time.sleep(1.2)
++                panel = ocr(shot(), PANEL_BOX)
++                sname = strategy_name(panel)
++                if not sname:
++                    # 名字读不到（单字「夕」、英文「pith」等），
++                    # 只要面板出现详情就说明点到了真卡片，直接选它。
++                    has_detail = any(("初始生命值" in t) or ("【" in t)
++                                     for _x, _y, t in panel)
++                    if has_detail:
++                        log(f"选择策略: <名字未能识别> @ ({gx},{gy})")
++                        return "<未识别>"
++                    log("策略面板无详情，跳过该格", (gx, gy))
+                     continue
+-                tap(gx, gy, 0.7)
+-                panel, sname = [], ""
+-                for _try in range(3):        # 右侧面板有切换动画，读不到名字就稍等重读
+-                    panel = ocr(shot(), (1440, 150, 1920, 800))
+-                    sname = strategy_name(panel)
+-                    if sname:
+-                        break
+-                    time.sleep(0.6)
+-                if not sname:
+-                    log("策略面板读取失败，跳过该格", (gx, gy))
++                if sname in tried:
+                     continue
+-                name = sname
+-                if name in tried:
+-                    continue
+-                tried.add(name)
++                tried.add(sname)
+                 n = passed_count(panel)
+                 if n >= TARGET:
++                    log(f"跳过已完成策略: {sname}（{n}次）")
+                     continue
+-                # 确认前再点一次并核对右侧面板名字，避免点击没生效而确认了别的策略
+-                ok_sel = False
+-                for _v in range(3):
+-                    time.sleep(0.4)
+-                    if strategy_name(ocr(shot(), (1440, 150, 1920, 800))) == name:
+-                        ok_sel = True
+-                        break
+-                    tap(gx, gy, 0.9)      # 只在面板名字不一致时再点（再点已选中的格子会取消选中）
+-                if not ok_sel:
+-                    log("核对策略名不一致，跳过该格", name)
+-                    continue
+-                log(f"选择策略: {name}（已通过 {n} 次" + (f"，继续凑满 {TARGET} 次）" if n else "，新策略）"))
+-                return name
++                log(f"选择策略: {sname}（已通过 {n} 次"
++                    + (f"，继续凑满 {TARGET} 次）" if n else "，新策略）"))
++                return sname
+         # 本页没有可用策略：向下滚动
+         scroll_grid()
+         after = shot()
+@@ -964,8 +1367,18 @@
              break                      # 列表不再移动 = 已到底
          rows = detect_rows(after)
          if not rows:
 -            break
 -        log(f"策略列表下滑，继续查找（本页 {len(rows)} 行）")
-+            # 行检测失败时不要直接放弃：退回固定网格 + 按滚动量平移，继续找
 +            sh2 = grid_shift(img, after)
 +            if sh2 is None:
 +                log("策略列表行检测失败且无法测量滚动量，停止查找")
@@ -459,7 +746,7 @@
      log("没有找到未获得角标的策略，全部完成？")
      return None
  
-@@ -1051,6 +1287,37 @@
+@@ -1051,6 +1464,37 @@
              picked.append(t)
      log("自选编队选择:", picked or "无（自选编队为空，直接开始）")
      tap(1686, 986, 1.5)
@@ -497,7 +784,7 @@
  
  
  # ---------------- 局内 ----------------
-@@ -1344,6 +1611,23 @@
+@@ -1344,6 +1788,23 @@
      return tuple(LAYOUT[kind][int(tn[len(kind):])])
  
  
@@ -521,7 +808,7 @@
  def deploy_layout(bench_xy, board, name_hint="", tier_hint=0, depth=0):
      """固定布局部署：安全位给维什戴尔/望/能天使/初雪，其余优先放敌人路径；
      位置不够时按权重把价值更低的干员换下来（低星卖掉，高星重新安排）"""
-@@ -1369,6 +1653,13 @@
+@@ -1369,6 +1830,13 @@
          log("拿起的是装备，放回:", drag_name(img) or "?")
          return None          # 装备（拖拽时会把有干员的格子标绿，不能当干员处理）
      name = drag_name(img) or name_hint
@@ -535,7 +822,7 @@
      tier = 5 if yellow_ratio(img, (20, 328, 58, 362)) > 0.08 else 1
      if prio_index(name) is not None:
          tier = max(tier, 5)          # 优先干员都是 Ⅴ/Ⅵ 阶，永不当作低星卖掉
-@@ -1405,9 +1696,26 @@
+@@ -1405,9 +1873,26 @@
          if free:
              target = free[0]
              break
